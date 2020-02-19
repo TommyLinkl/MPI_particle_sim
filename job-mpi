@@ -2,14 +2,12 @@
 #SBATCH -N 1
 #SBATCH -C knl
 #SBATCH -q debug
-#SBATCH -J cs267
+#SBATCH -J mpitest
+#SBATCH --ntasks-per-node=68
 #SBATCH -t 00:30:00
 
-#OpenMP settings:
-export OMP_NUM_THREADS=68
-export OMP_PLACES=cores
-export OMP_PROC_BIND=spread
+#modules
+module load openmpi
 
 #run the application:
-srun -n 1 -c 68 --cpu_bind=cores ./openmp
-
+srun ./mpi -o test.out -s 1
