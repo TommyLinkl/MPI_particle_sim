@@ -10,4 +10,4 @@
 module load openmpi
 
 #run the application:
-srun ./mpi -o test.out -s 1
+srun ./mpi
