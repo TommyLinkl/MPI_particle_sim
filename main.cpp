@@ -17,12 +17,12 @@ void save(std::ofstream& fsave, particle_t* parts, int num_parts, double size) {
     static bool first = true;
 
     if (first) {
-        fsave << num_parts << " " << size << std::endl;
+        fsave << num_parts << " " << size << "\n";
         first = false;
     }
 
     for (int i = 0; i < num_parts; ++i) {
-        fsave << parts[i].x << " " << parts[i].y << std::endl;
+        fsave << parts[i].x << " " << parts[i].y << "\n";
     }
 
     fsave << std::endl;
