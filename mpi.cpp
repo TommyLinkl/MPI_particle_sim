@@ -11,6 +11,9 @@ vector<bin_type_idx> particle_bins_idx;
 double gridSize; 
 double binSize; 
 int binNum; 
+int procBinLBound;
+int procBinUBound;
+
 
 // Put any static global variables here that you will use throughout the simulation.
 
@@ -55,31 +58,62 @@ void move(particle_t& p, double size) {
 }
 
 
-void init_simulation(particle_t* parts, int num_parts, double size, int rank, int num_procs) {
-    gridSize = sqrt(num_parts*density);
-    binSize = cutoff * 2;  
-    binNum = int(gridSize / binSize)+1; // Should be around sqrt(N/2)
-    particle_bins_idx.resize(binNum * binNum); 
+// 1. bin the particles (in init)
 
-    for (int i = 0; i < num_parts; i++) {
-        int x = int(parts[i].x / binSize);
-        int y = int(parts[i].y / binSize);
-        particle_bins_idx[x*binNum + y].push_back(i); 
+// 2. communicate particles to neighbors
+
+// 3. calculate forces
+
+// 4. move particles
+
+// 5. communicate re-binned particles
+
+// 6. flush neighbor particle memory
+
+
+void init_simulation(particle_t* parts, int num_parts, double size, int rank, int num_procs) {
+    // Initialize bins
+    int nBins = (int)(size / cutoff) + 1;    
+    std::vector<bin_t> bins(nBins * nBins);
+
+    // Partition particles into bins
+    for (int i = 0; i < num_parts; ++i) {
+        int bin_x = (int)(parts[i].x / size * nBins);
+        int bin_y = (int)(parts[i].y / size * nBins);
+        int bin_index = bin_x * nBins + bin_y;
+        bins[bin_index].particles.push_back(&parts[i]);
     }
 
-    // delete[] parts;
-    // parts = NULL;
+    // Determine bins to be responsible for
+    // goes from [procBinLBound, procBinUbound)
+    int nProcBins = (int)(nBins / num_procs);
+
+    procBinLBound = rank * nProcBins;
+    procBinUBound = (rank + 1) * nProcBins;
+
+    if (rank < nBins % num_procs) {
+        procBinLBound += rank;
+        procBinUBound += rank;
+    } else {
+        procBinLBound += nBins % num_procs;
+        procBinUBound += nBins % num_procs;
+    }
 }
 
 void simulate_one_step(particle_t* parts, int num_parts, double size, int rank, int num_procs) {
-    // navg = 0;
-    // dmin = 1.0;
-    // davg = 0.0;
-    
+    // Communicate particles
+    // Even ranks send to odds first
+    // be sure to include edge cases (first and last row)
+    if (rank % 2 == 0) {    // evens
+
+    } else {                // odds
+
+    }
+
     //  compute forces
-    for (int i = 0; i < binNum; i++) {
-        for (int j = 0; j < binNum; j++) {            
-            bin_type_idx& vec_idx = particle_bins_idx[i*binNum+j]; 
+    for (int i = procBinLBound; i < procBinUBound; i++) { // i-th row
+        for (int j = 0; j < binNum; j++) { // j-th col
+            bin_type_idx& vec_idx = particle_bins_idx[i*binNum+j];
             for (int k = 0; k < vec_idx.size(); k++) {
                 parts[vec_idx[k]].ax = parts[vec_idx[k]].ay = 0; 
             }
@@ -96,12 +130,12 @@ void simulate_one_step(particle_t* parts, int num_parts, double size, int rank, 
             }
         }
     }
-    // printf("Done with compute force. \n");
+
 
     // Move particles
     bin_type_idx temp;
-    for (int i = 0; i < binNum; i++) {
-        for(int j = 0; j < binNum; j++) {            
+    for (int i = procBinLBound; i < procBinUBound; i++) { // i-th row
+        for(int j = 0; j < binNum; j++) { // j-th col
             bin_type_idx& vec_idx = particle_bins_idx[i * binNum + j]; 
             int tail = vec_idx.size(), k = 0;
             while(k < tail) {
