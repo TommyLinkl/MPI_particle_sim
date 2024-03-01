@@ -3,19 +3,11 @@
 #include <vector>
 
 // Put any static global variables here that you will use throughout the simulation.
-using std::vector;
-typedef std::vector<particle_t> bin_type;
-typedef std::vector<int> bin_type_idx;
-
-vector<bin_type_idx> particle_bins_idx;
-
-int num_proc_x, num_proc_y;  // total number of processors along the x- and y- axes
-int proc_x, proc_y;
-double left_x, right_x, bottom_y, top_y;
-int neighbors[8];
-int num_neighbors = 0;
-int nlocal;
-int nghosts = 0;
+int navg, nabsavg=0;
+double dmin, absmin=1.0,davg,absavg=0.0;
+double rdavg,rdmin;
+int rnavg;
+int nlocal; 
 
 void apply_force(particle_t& particle, particle_t& neighbor) {
     // Calculate Distance
@@ -59,85 +51,62 @@ void move(particle_t& p, double size) {
 
 
 void init_simulation(particle_t* parts, int num_parts, double size, int rank, int num_procs) {
-	for(int factor = (int)floor(sqrt((double)num_procs)); factor >= 1; --factor) {
-		if(num_procs % factor == 0) {
-			num_proc_x = factor;
-			num_proc_y = num_procs/factor;
-			break;
-		}
-	}
-	
-	// Determine where this cell is
-	proc_x = rank % num_proc_x;
-	proc_y = rank/num_proc_x;
-	
-	// Determine my cell boundaries
-	left_x   = (proc_x==0)            ? (0)        : ((sim_size/num_proc_x)*proc_x);
-	right_x  = (proc_x==num_proc_x-1) ? (sim_size) : ((sim_size/num_proc_x)*(proc_x+1));
-	bottom_y = (proc_y==0)            ? (0)        : ((sim_size/num_proc_y)*proc_y);
-	top_y    = (proc_y==num_proc_y-1) ? (sim_size) : ((sim_size/num_proc_y)*(proc_y+1));
 
-	// Determine the ranks of my neighbors for message passing, NONE means no neighbor
-	neighbors[p_sw] = ((proc_x != 0)            && (proc_y != 0)           ) ? ((proc_y-1)*num_proc_x + (proc_x-1)) : (NONE);
-	neighbors[p_s ] = (                            (proc_y != 0)           ) ? ((proc_y-1)*num_proc_x + (proc_x  )) : (NONE);
-	neighbors[p_se] = ((proc_x != num_proc_x-1) && (proc_y != 0)           ) ? ((proc_y-1)*num_proc_x + (proc_x+1)) : (NONE);
-	neighbors[p_w ] = ((proc_x != 0)                                       ) ? ((proc_y  )*num_proc_x + (proc_x-1)) : (NONE);
-	neighbors[p_e ] = ((proc_x != num_proc_x-1)                            ) ? ((proc_y  )*num_proc_x + (proc_x+1)) : (NONE);
-	neighbors[p_nw] = ((proc_x != 0)            && (proc_y != num_proc_y-1)) ? ((proc_y+1)*num_proc_x + (proc_x-1)) : (NONE);
-	neighbors[p_n ] = (                            (proc_y != num_proc_y-1)) ? ((proc_y+1)*num_proc_x + (proc_x  )) : (NONE);
-	neighbors[p_ne] = ((proc_x != num_proc_x-1) && (proc_y != num_proc_y-1)) ? ((proc_y+1)*num_proc_x + (proc_x+1)) : (NONE);
-    
-	for(int i = 0 ; i < 8; ++i) {
-		if(neighbors[i] != NONE) num_neighbors++;
-	}
+    //  set up the data partitioning across processors
+    int particle_per_proc = (num_parts + num_procs - 1) / num_procs;
+    int *partition_offsets = (int*) malloc( (num_procs+1) * sizeof(int) );
+    for( int i = 0; i < num_procs+1; i++ )
+        partition_offsets[i] = min( i * particle_per_proc, num_parts );
 
-    //  allocate storage for local particles, ghost particles
-    particle_t *local = (particle_t*) malloc( num_parts * sizeof(particle_t) );
-	char *p_valid = (char*) malloc(num_parts * sizeof(char));
-	
-    int ghost_packet_length[8];
-    particle_t* ghost_packet_particles[8]; // In order of SW, S, SE, W, E, NW, N, NE
-    MPI_Request mpi_ghost_requests[8];
-    for(int i = 0; i < 8; ++i) {
-		ghost_packet_particles[i] = (particle_t *) malloc(num_parts * sizeof(particle_t));
-	}
+    int *partition_sizes = (int*) malloc( num_procs * sizeof(int) );
+    for( int i = 0; i < num_procs; i++ )
+        partition_sizes[i] = partition_offsets[i+1] - partition_offsets[i];
 
+    //  allocate storage for local partition
+    nlocal = partition_sizes[rank];
+    particle_t *local = (particle_t*) malloc( nlocal * sizeof(particle_t) );
 
-	init_emigrant_buf(num_parts);
-
-	nlocal = select_particles(num_parts, parts, local, p_valid, left_x, right_x, bottom_y, top_y);
-	
-	particle_t* ghost_particles = (particle_t *) malloc(num_parts * sizeof(particle_t));
+    //  initialize and distribute the particles (that's fine to leave it unoptimized)
+    set_size( n );
+    if( rank == 0 )
+        init_particles( n, particles );
+    MPI_Scatterv( particles, partition_sizes, partition_offsets, PARTICLE, local, nlocal, PARTICLE, 0, MPI_COMM_WORLD );
 }
 
 void simulate_one_step(particle_t* parts, int num_parts, double size, int rank, int num_procs) {
-    //  Handle ghosting
-    prepare_ghost_packets(local, p_valid, nlocal, left_x, right_x, bottom_y, top_y, neighbors);
-    send_ghost_packets(neighbors);
-    receive_ghost_packets(&nghosts, ghost_particles, neighbors, num_neighbors, n);
-    
-    //  Compute all forces
-    compute_forces(local, p_valid, nlocal, ghost_particles, nghosts);
-    
-    //  Move particles
-    int seen_particles = 0;
-    
-    for(int i = 0; seen_particles < nlocal; ++i)
-    {
-        if(p_valid[i] == INVALID) continue;
-        seen_particles++;
-        
-        move( local[i] );
+    navg = 0;
+    dmin = 1.0;
+    davg = 0.0;
+
+    //  collect all global data locally
+    MPI_Allgatherv( local, nlocal, PARTICLE, particles, partition_sizes, partition_offsets, PARTICLE, MPI_COMM_WORLD );
+
+    //  compute all forces
+    for( int i = 0; i < nlocal; i++ ) {
+        local[i].ax = local[i].ay = 0;
+        for (int j = 0; j < n; j++ )
+            apply_force( local[i], particles[j], &dmin, &davg, &navg );
     }
-    
-    //
-    //  Handle migration
-    //
-    prepare_emigrants(local, p_valid, &nlocal, left_x, right_x, bottom_y, top_y, neighbors);
-    send_emigrants(neighbors);
-    receive_immigrants(neighbors, num_neighbors, local, p_valid, &nlocal, n, n);
-    
-    //
+
+    if( find_option( argc, argv, "-no" ) == -1 )
+    {
+
+        MPI_Reduce(&davg,&rdavg,1,MPI_DOUBLE,MPI_SUM,0,MPI_COMM_WORLD);
+        MPI_Reduce(&navg,&rnavg,1,MPI_INT,MPI_SUM,0,MPI_COMM_WORLD);
+        MPI_Reduce(&dmin,&rdmin,1,MPI_DOUBLE,MPI_MIN,0,MPI_COMM_WORLD);
+
+        if (rank == 0){
+            if (rnavg) {
+                absavg +=  rdavg/rnavg;
+                nabsavg++;
+            }
+            if (rdmin < absmin) absmin = rdmin;
+        }
+    }
+
+    //  move particles
+    for( int i = 0; i < nlocal; i++ )
+        move( local[i] );
 }
 
 void gather_for_save(particle_t* parts, int num_parts, double size, int rank, int num_procs) {
