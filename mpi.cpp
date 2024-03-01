@@ -2,17 +2,20 @@
 #include <mpi.h>
 #include <vector>
 
+// Put any static global variables here that you will use throughout the simulation.
 using std::vector;
 typedef std::vector<particle_t> bin_type;
 typedef std::vector<int> bin_type_idx;
 
 vector<bin_type_idx> particle_bins_idx;
 
-double gridSize; 
-double binSize; 
-int binNum; 
-
-// Put any static global variables here that you will use throughout the simulation.
+int num_proc_x, num_proc_y;  // total number of processors along the x- and y- axes
+int proc_x, proc_y;
+double left_x, right_x, bottom_y, top_y;
+int neighbors[8];
+int num_neighbors = 0;
+int nlocal;
+int nghosts = 0;
 
 void apply_force(particle_t& particle, particle_t& neighbor) {
     // Calculate Distance
@@ -56,80 +59,85 @@ void move(particle_t& p, double size) {
 
 
 void init_simulation(particle_t* parts, int num_parts, double size, int rank, int num_procs) {
-    gridSize = sqrt(num_parts*density);
-    binSize = cutoff * 2;  
-    binNum = int(gridSize / binSize)+1; // Should be around sqrt(N/2)
-    particle_bins_idx.resize(binNum * binNum); 
+	for(int factor = (int)floor(sqrt((double)num_procs)); factor >= 1; --factor) {
+		if(num_procs % factor == 0) {
+			num_proc_x = factor;
+			num_proc_y = num_procs/factor;
+			break;
+		}
+	}
+	
+	// Determine where this cell is
+	proc_x = rank % num_proc_x;
+	proc_y = rank/num_proc_x;
+	
+	// Determine my cell boundaries
+	left_x   = (proc_x==0)            ? (0)        : ((sim_size/num_proc_x)*proc_x);
+	right_x  = (proc_x==num_proc_x-1) ? (sim_size) : ((sim_size/num_proc_x)*(proc_x+1));
+	bottom_y = (proc_y==0)            ? (0)        : ((sim_size/num_proc_y)*proc_y);
+	top_y    = (proc_y==num_proc_y-1) ? (sim_size) : ((sim_size/num_proc_y)*(proc_y+1));
 
-    for (int i = 0; i < num_parts; i++) {
-        int x = int(parts[i].x / binSize);
-        int y = int(parts[i].y / binSize);
-        particle_bins_idx[x*binNum + y].push_back(i); 
-    }
+	// Determine the ranks of my neighbors for message passing, NONE means no neighbor
+	neighbors[p_sw] = ((proc_x != 0)            && (proc_y != 0)           ) ? ((proc_y-1)*num_proc_x + (proc_x-1)) : (NONE);
+	neighbors[p_s ] = (                            (proc_y != 0)           ) ? ((proc_y-1)*num_proc_x + (proc_x  )) : (NONE);
+	neighbors[p_se] = ((proc_x != num_proc_x-1) && (proc_y != 0)           ) ? ((proc_y-1)*num_proc_x + (proc_x+1)) : (NONE);
+	neighbors[p_w ] = ((proc_x != 0)                                       ) ? ((proc_y  )*num_proc_x + (proc_x-1)) : (NONE);
+	neighbors[p_e ] = ((proc_x != num_proc_x-1)                            ) ? ((proc_y  )*num_proc_x + (proc_x+1)) : (NONE);
+	neighbors[p_nw] = ((proc_x != 0)            && (proc_y != num_proc_y-1)) ? ((proc_y+1)*num_proc_x + (proc_x-1)) : (NONE);
+	neighbors[p_n ] = (                            (proc_y != num_proc_y-1)) ? ((proc_y+1)*num_proc_x + (proc_x  )) : (NONE);
+	neighbors[p_ne] = ((proc_x != num_proc_x-1) && (proc_y != num_proc_y-1)) ? ((proc_y+1)*num_proc_x + (proc_x+1)) : (NONE);
+    
+	for(int i = 0 ; i < 8; ++i) {
+		if(neighbors[i] != NONE) num_neighbors++;
+	}
 
-    // delete[] parts;
-    // parts = NULL;
+    //  allocate storage for local particles, ghost particles
+    particle_t *local = (particle_t*) malloc( num_parts * sizeof(particle_t) );
+	char *p_valid = (char*) malloc(num_parts * sizeof(char));
+	
+    int ghost_packet_length[8];
+    particle_t* ghost_packet_particles[8]; // In order of SW, S, SE, W, E, NW, N, NE
+    MPI_Request mpi_ghost_requests[8];
+    for(int i = 0; i < 8; ++i) {
+		ghost_packet_particles[i] = (particle_t *) malloc(num_parts * sizeof(particle_t));
+	}
+
+
+	init_emigrant_buf(num_parts);
+
+	nlocal = select_particles(num_parts, parts, local, p_valid, left_x, right_x, bottom_y, top_y);
+	
+	particle_t* ghost_particles = (particle_t *) malloc(num_parts * sizeof(particle_t));
 }
 
 void simulate_one_step(particle_t* parts, int num_parts, double size, int rank, int num_procs) {
-    // navg = 0;
-    // dmin = 1.0;
-    // davg = 0.0;
+    //  Handle ghosting
+    prepare_ghost_packets(local, p_valid, nlocal, left_x, right_x, bottom_y, top_y, neighbors);
+    send_ghost_packets(neighbors);
+    receive_ghost_packets(&nghosts, ghost_particles, neighbors, num_neighbors, n);
     
-    //  compute forces
-    for (int i = 0; i < binNum; i++) {
-        for (int j = 0; j < binNum; j++) {            
-            bin_type_idx& vec_idx = particle_bins_idx[i*binNum+j]; 
-            for (int k = 0; k < vec_idx.size(); k++) {
-                parts[vec_idx[k]].ax = parts[vec_idx[k]].ay = 0; 
-            }
-            for (int dx = -1; dx <= 1; dx++) {
-                for (int dy = -1; dy <= 1; dy++) {     // These for loops looks over a three by three stencil around the bin
-                    if (i + dx >= 0 && i + dx < binNum && j + dy >= 0 && j + dy < binNum) {  // Edge cases
-                        bin_type_idx& vec2_idx = particle_bins_idx[(i+dx) * binNum + j + dy]; 
-                        for (int k = 0; k < vec_idx.size(); k++)
-                            for (int l = 0; l < vec2_idx.size(); l++) {
-                                apply_force(parts[vec_idx[k]], parts[vec2_idx[l]]);
-                            }
-                    }
-                }
-            }
-        }
+    //  Compute all forces
+    compute_forces(local, p_valid, nlocal, ghost_particles, nghosts);
+    
+    //  Move particles
+    int seen_particles = 0;
+    
+    for(int i = 0; seen_particles < nlocal; ++i)
+    {
+        if(p_valid[i] == INVALID) continue;
+        seen_particles++;
+        
+        move( local[i] );
     }
-    // printf("Done with compute force. \n");
-
-    // Move particles
-    bin_type_idx temp;
-    for (int i = 0; i < binNum; i++) {
-        for(int j = 0; j < binNum; j++) {            
-            bin_type_idx& vec_idx = particle_bins_idx[i * binNum + j]; 
-            int tail = vec_idx.size(), k = 0;
-            while(k < tail) {
-                move( parts[vec_idx[k]], size); 
-                int x = int(parts[vec_idx[k]].x / binSize); //Check the position
-                int y = int(parts[vec_idx[k]].y / binSize);
-                if (x == i && y == j)  // Still inside original bin
-                    k++;
-                else
-                {
-                    temp.push_back(vec_idx[k]);  // Store paricles that have changed bin. 
-                    vec_idx[k] = vec_idx[--tail]; //Remove it from the current bin.
-                }
-            }
-            vec_idx.resize(k);
-        }
-    }
-    // printf("Done with moving particles. \n");
-
-    // Rebin the particles
-    for (int i = 0; i < temp.size(); ++i) {
-            int x = temp[i].x / binSize;
-            int y = temp[i].y / binSize;
-            bins[x*binNum + y].push_back(temp[i]);
-        }
-
-    //  Deleting the temp list
-    temp.clear();
+    
+    //
+    //  Handle migration
+    //
+    prepare_emigrants(local, p_valid, &nlocal, left_x, right_x, bottom_y, top_y, neighbors);
+    send_emigrants(neighbors);
+    receive_immigrants(neighbors, num_neighbors, local, p_valid, &nlocal, n, n);
+    
+    //
 }
 
 void gather_for_save(particle_t* parts, int num_parts, double size, int rank, int num_procs) {
