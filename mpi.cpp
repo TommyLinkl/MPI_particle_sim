@@ -2,13 +2,9 @@
 #include <mpi.h>
 #include <vector>
 
+#define GHOST_LENGTH (cutoff*2)
+
 // Put any static global variables here that you will use throughout the simulation.
-using std::vector;
-typedef std::vector<particle_t> bin_type;
-typedef std::vector<int> bin_type_idx;
-
-vector<bin_type_idx> particle_bins_idx;
-
 int num_proc_x, num_proc_y;  // total number of processors along the x- and y- axes
 int proc_x, proc_y;
 double left_x, right_x, bottom_y, top_y;
@@ -16,26 +12,36 @@ int neighbors[8];
 int num_neighbors = 0;
 int nlocal;
 int nghosts = 0;
+int ghost_packet_length[8];
+MPI_Request mpi_ghost_requests[8];
+particle_t* ghost_packet_particles[8]; // In order of SW, S, SE, W, E, NW, N, NE
 
-void apply_force(particle_t& particle, particle_t& neighbor) {
-    // Calculate Distance
-    double dx = neighbor.x - particle.x;
-    double dy = neighbor.y - particle.y;
-    double r2 = dx * dx + dy * dy;
+particle_t **emigrant_buf;
+particle_t *immigrant_buf;
+int *emigrant_cnt;
+MPI_Request mpi_em_requests[8];
 
-    // Check if the two particles should interact
-    if (r2 > cutoff * cutoff)
-        return;
-
-    r2 = fmax(r2, min_r * min_r);
-    double r = sqrt(r2);
-
-    // Very simple short-range repulsive force
-    double coef = (1 - cutoff / r) / r2 / mass;
-    particle.ax += coef * dx;
-    particle.ay += coef * dy;
+void compute_forces(particle_t local[], char p_valid[], int num_particles, particle_t ghosts[], int num_ghosts) {
+	int seen_particles = 0;
+	for(int i = 0; seen_particles < num_particles; ++i)
+	{
+		if(p_valid[i] == INVALID) continue;
+		seen_particles++;
+		
+		local[i].ax = local[i].ay = 0;
+		int nearby_seen_particles = 0;
+		for (int j = 0; nearby_seen_particles < num_particles; ++j) {
+			if(p_valid[j] == INVALID) continue;
+			nearby_seen_particles++;
+			
+			apply_force( local[i], local[j] );
+		}
+		
+		for(int j = 0; j < num_ghosts; ++j) {
+			apply_force( local[i], ghosts[j]);
+		}
+	}
 }
-
 
 void move(particle_t& p, double size) {
     // Slightly simplified Velocity Verlet integration
@@ -78,14 +84,14 @@ void init_simulation(particle_t* parts, int num_parts, double size, int rank, in
 	top_y    = (proc_y==num_proc_y-1) ? (sim_size) : ((sim_size/num_proc_y)*(proc_y+1));
 
 	// Determine the ranks of my neighbors for message passing, NONE means no neighbor
-	neighbors[p_sw] = ((proc_x != 0)            && (proc_y != 0)           ) ? ((proc_y-1)*num_proc_x + (proc_x-1)) : (NONE);
-	neighbors[p_s ] = (                            (proc_y != 0)           ) ? ((proc_y-1)*num_proc_x + (proc_x  )) : (NONE);
-	neighbors[p_se] = ((proc_x != num_proc_x-1) && (proc_y != 0)           ) ? ((proc_y-1)*num_proc_x + (proc_x+1)) : (NONE);
-	neighbors[p_w ] = ((proc_x != 0)                                       ) ? ((proc_y  )*num_proc_x + (proc_x-1)) : (NONE);
-	neighbors[p_e ] = ((proc_x != num_proc_x-1)                            ) ? ((proc_y  )*num_proc_x + (proc_x+1)) : (NONE);
-	neighbors[p_nw] = ((proc_x != 0)            && (proc_y != num_proc_y-1)) ? ((proc_y+1)*num_proc_x + (proc_x-1)) : (NONE);
-	neighbors[p_n ] = (                            (proc_y != num_proc_y-1)) ? ((proc_y+1)*num_proc_x + (proc_x  )) : (NONE);
-	neighbors[p_ne] = ((proc_x != num_proc_x-1) && (proc_y != num_proc_y-1)) ? ((proc_y+1)*num_proc_x + (proc_x+1)) : (NONE);
+	neighbors[0] = ((proc_x != 0)            && (proc_y != 0)           ) ? ((proc_y-1)*num_proc_x + (proc_x-1)) : (NONE);
+	neighbors[1] = (                            (proc_y != 0)           ) ? ((proc_y-1)*num_proc_x + (proc_x  )) : (NONE);
+	neighbors[2] = ((proc_x != num_proc_x-1) && (proc_y != 0)           ) ? ((proc_y-1)*num_proc_x + (proc_x+1)) : (NONE);
+	neighbors[3] = ((proc_x != 0)                                       ) ? ((proc_y  )*num_proc_x + (proc_x-1)) : (NONE);
+	neighbors[4] = ((proc_x != num_proc_x-1)                            ) ? ((proc_y  )*num_proc_x + (proc_x+1)) : (NONE);
+	neighbors[5] = ((proc_x != 0)            && (proc_y != num_proc_y-1)) ? ((proc_y+1)*num_proc_x + (proc_x-1)) : (NONE);
+	neighbors[6] = (                            (proc_y != num_proc_y-1)) ? ((proc_y+1)*num_proc_x + (proc_x  )) : (NONE);
+	neighbors[7] = ((proc_x != num_proc_x-1) && (proc_y != num_proc_y-1)) ? ((proc_y+1)*num_proc_x + (proc_x+1)) : (NONE);
     
 	for(int i = 0 ; i < 8; ++i) {
 		if(neighbors[i] != NONE) num_neighbors++;
@@ -93,21 +99,29 @@ void init_simulation(particle_t* parts, int num_parts, double size, int rank, in
 
     //  allocate storage for local particles, ghost particles
     particle_t *local = (particle_t*) malloc( num_parts * sizeof(particle_t) );
-	char *p_valid = (char*) malloc(num_parts * sizeof(char));
-	
-    int ghost_packet_length[8];
-    particle_t* ghost_packet_particles[8]; // In order of SW, S, SE, W, E, NW, N, NE
-    MPI_Request mpi_ghost_requests[8];
-    for(int i = 0; i < 8; ++i) {
+	particle_t* ghost_particles = (particle_t *) malloc(num_parts * sizeof(particle_t));
+	char *p_valid = (char*) malloc(num_parts * sizeof(char));   // Tells me which particles are in this box
+    for(int i = 0; i < 8; ++i) {   // In order of SW, S, SE, W, E, NW, N, NE
 		ghost_packet_particles[i] = (particle_t *) malloc(num_parts * sizeof(particle_t));
 	}
 
+    immigrant_buf = (particle_t*)malloc(num_parts * sizeof(particle_t));   // Receive from neighbors
+    emigrant_buf = (particle_t**)malloc(8 * sizeof(particle_t*));  // Send out to all 8 neighbors
+    emigrant_cnt = (int*)malloc(num_parts * sizeof(int));
+    for(int i = 0; i < 8; i++) {
+        emigrant_buf[i] = (particle_t*)malloc(num_parts * sizeof(particle_t));
+    }
 
-	init_emigrant_buf(num_parts);
+    int current_particle = 0;
+	for(int i = 0; i < num_parts; ++i) {
+		if((parts[i].x >= left_x) && (parts[i].x < right_x) && (parts[i].y >= bottom_y) && (parts[i].y < top_y)){
+			local[current_particle] = parts[i];
+			p_valid[current_particle] = VALID;
+			current_particle++;
+		}
+	}
+	nlocal = current_particle; 
 
-	nlocal = select_particles(num_parts, parts, local, p_valid, left_x, right_x, bottom_y, top_y);
-	
-	particle_t* ghost_particles = (particle_t *) malloc(num_parts * sizeof(particle_t));
 }
 
 void simulate_one_step(particle_t* parts, int num_parts, double size, int rank, int num_procs) {
