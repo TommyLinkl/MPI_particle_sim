@@ -100,6 +100,7 @@ MPI_Datatype PARTICLE;
 // ==============
 
 int main(int argc, char** argv) {
+    printf("Am I here? ");
     // Parse Args
     if (find_arg_idx(argc, argv, "-h") >= 0) {
         std::cout << "Options:" << std::endl;
@@ -114,6 +115,7 @@ int main(int argc, char** argv) {
     char* savename = find_string_option(argc, argv, "-o", nullptr);
     std::ofstream fsave(savename);
 
+    printf("Am I here? ");
     // Init MPI
     int num_procs, rank;
     MPI_Init(&argc, &argv);
