@@ -100,7 +100,6 @@ MPI_Datatype PARTICLE;
 // ==============
 
 int main(int argc, char** argv) {
-    printf("Am I here? ");
     // Parse Args
     if (find_arg_idx(argc, argv, "-h") >= 0) {
         std::cout << "Options:" << std::endl;
@@ -115,7 +114,6 @@ int main(int argc, char** argv) {
     char* savename = find_string_option(argc, argv, "-o", nullptr);
     std::ofstream fsave(savename);
 
-    printf("Am I here? ");
     // Init MPI
     int num_procs, rank;
     MPI_Init(&argc, &argv);
@@ -139,7 +137,7 @@ int main(int argc, char** argv) {
     MPI_Type_commit(&PARTICLE);
 
     // Initialize Particles
-    int num_parts = find_int_arg(argc, argv, "-n", 1000);
+    int num_parts = find_int_arg(argc, argv, "-n", 1000);  
     int part_seed = find_int_arg(argc, argv, "-s", 0);
     double size = sqrt(density * num_parts);
 
@@ -157,6 +155,7 @@ int main(int argc, char** argv) {
     init_simulation(parts, num_parts, size, rank, num_procs);
 
     for (int step = 0; step < nsteps; ++step) {
+        printf("Step %d / %d \n", step, nsteps);
         simulate_one_step(parts, num_parts, size, rank, num_procs);
 
         // Save state if necessary

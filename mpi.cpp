@@ -82,6 +82,7 @@ void compute_forces(particle_t local[], char p_valid[], int num_particles, parti
 	for(int i = 0; seen_particles < num_particles; ++i) {
 		if(p_valid[i] == INVALID) continue;
 		seen_particles++;
+        // printf("ComputeForces: num_particles, i, local[i].x = %d, %d, %f\n", num_particles, i, local[i].x); 
 		
 		local[i].ax = local[i].ay = 0;
 		int nearby_seen_particles = 0;
@@ -289,7 +290,6 @@ void receive_immigrants(int* neighbors, int num_neighbors, particle_t* particles
 }
 
 
-
 void init_simulation(particle_t* parts, int num_parts, double size, int rank, int num_procs) {
 	for(int factor = (int)floor(sqrt((double)num_procs)); factor >= 1; --factor) {
 		if(num_procs % factor == 0) {
@@ -322,11 +322,21 @@ void init_simulation(particle_t* parts, int num_parts, double size, int rank, in
 	for(int i = 0 ; i < 8; ++i) {
 		if(neighbors[i] != NONE) num_neighbors++;
 	}
+    printf("neighbors[0] through [7]: %d, %d, %d, %d, %d, %d, %d, %d\n", neighbors[0],neighbors[1],neighbors[2],neighbors[3],neighbors[4],neighbors[5],neighbors[6],neighbors[7]);
+    printf("num_neighbors = %d\n", num_neighbors);
+    printf("Done with INIT\n");
+}
 
+
+void simulate_one_step(particle_t* parts, int num_parts, double size, int rank, int num_procs) {
+    MPI_Barrier(MPI_COMM_WORLD);
     //  allocate storage for local particles, ghost particles
     local = (particle_t*) malloc( num_parts * sizeof(particle_t) );
 	ghost_particles = (particle_t *) malloc(num_parts * sizeof(particle_t));
 	p_valid = (char*) malloc(num_parts * sizeof(char));   // Tells me which particles are in this box and in its ghost zone
+    for (int i = 0; i < num_parts; ++i) {   // In order of SW, S, SE, W, E, NW, N, NE
+		p_valid[i] = INVALID; 
+	}
     for(int i = 0; i < 8; ++i) {   // In order of SW, S, SE, W, E, NW, N, NE
 		ghost_packet_particles[i] = (particle_t *) malloc(num_parts * sizeof(particle_t));
 	}
@@ -347,12 +357,9 @@ void init_simulation(particle_t* parts, int num_parts, double size, int rank, in
 		}
 	}
 	nlocal = current_particle; 
-    printf("Done with INIT");
-}
+    printf("nlocal = %d\n", nlocal); 
 
 
-void simulate_one_step(particle_t* parts, int num_parts, double size, int rank, int num_procs) {
-    
     //  Handle ghosting
 
     // prepare ghost packets
@@ -363,9 +370,12 @@ void simulate_one_step(particle_t* parts, int num_parts, double size, int rank, 
 	for(int i = 0; seen_particles < num_parts; ++i) {
 		if(p_valid[i] == INVALID) continue;
 		seen_particles++;
-		
+        printf("num_parts, i, parts[i].x = %d, %d, %f\n", num_parts, i, parts[i].x); 
+
 		if(parts[i].x <= (left_x + GHOST_LENGTH)) { // check if in W, SW, or NW ghost zone by x
+            // printf("checking is okay. \n");
 			if((neighbors[3] != -1)) { // Add to packet if W neighbor exists
+                // printf("West, ghost_packet_length[3] = %d, out of max length of %d\n", ghost_packet_length[3], num_parts);
 				ghost_packet_particles[3][ghost_packet_length[3]] = parts[i];
 				++ghost_packet_length[3];
 			}
@@ -414,7 +424,7 @@ void simulate_one_step(particle_t* parts, int num_parts, double size, int rank, 
 			}
 		}
 	}
-    printf("Done with preparing ghost package. ");
+    printf("Done with preparing ghost package. \n");
 
     // send ghost packets
     int rc = 0;
@@ -423,29 +433,45 @@ void simulate_one_step(particle_t* parts, int num_parts, double size, int rank, 
 			MPI_Isend(ghost_packet_particles[i], ghost_packet_length[i], PARTICLE, neighbors[i], GHOST_TAG, MPI_COMM_WORLD, &(mpi_ghost_requests[rc++]));
 		}
 	}
-    printf("Done with sending ghost package. ");
+    printf("Done with sending ghost package. \n");
 
     // receive ghost packets
     receive_ghost_packets(&nghosts, ghost_particles, neighbors, num_neighbors, num_parts);
-    printf("Done with receiving ghost package. ");
+    printf("Done with receiving ghost package. \n");
     
     //  Compute all forces
     compute_forces(local, p_valid, nlocal, ghost_particles, nghosts);
-    printf("Done with computing forces. ");
+    printf("Done with computing forces. \n");
     
     //  Move particles
     seen_particles = 0;
-    for(int i = 0; seen_particles < nlocal; ++i) {
+    for(int i = 0; i < nlocal; ++i) {
         if(p_valid[i] == INVALID) continue;
-        seen_particles++;
+        // seen_particles++;
         move( local[i], size);
     }
-    printf("Done with moving particles. ");
+    printf("Done with moving particles. \n");
     
     //  Handle migration
+    printf("before emigration, nlocal = %d\n", nlocal);
     prepare_emigrants(local, p_valid, &nlocal, left_x, right_x, bottom_y, top_y, neighbors);
+    printf("After emigration, nlocal = %d\n", nlocal);
     send_emigrants(neighbors);
     receive_immigrants(neighbors, num_neighbors, local, p_valid, &nlocal, num_parts, num_parts);
+
+    free( local );
+	free( ghost_particles );
+    free( p_valid );
+	for(int i = 0; i < 8; ++i) {
+		free(ghost_packet_particles[i]);
+	}
+    for(int i = 0; i < 8; i++){
+        free(emigrant_buf[i]);
+    }
+    free(immigrant_buf);
+    free(emigrant_buf);
+    free(emigrant_cnt);
+    
 
 }
 
