@@ -36,6 +36,8 @@ int ghosts_outgoing_size[8];   //outgoing ghost packet length in each direction.
 std::vector<particle_t> ghosts_incomingBuffer[8];   // Incoming buffer for the ghosts
 int ghosts_incomingBuffer_size[8];   // This is important for MPI_Recv  
 MPI_Request mpi_ghost_requests[8];
+MPI_Request mpi_ghost_size_requests[8];   MPI_Status status1[8];
+MPI_Request mpi_ghost_data_requests[8];   MPI_Status status2[8];
 std::vector<particle_t> all_incoming_ghosts;
 
 /* For moving particles */
@@ -44,6 +46,8 @@ int moving_out_size[8];
 std::vector<particle_t> moving_in_parts[8]; 
 int moving_in_size[8];   // This is important for MPI_Recv  
 MPI_Request mpi_move_requests[8];
+MPI_Request mpi_move_size_requests[8];   MPI_Status status3[8];
+MPI_Request mpi_move_data_requests[8];   MPI_Status status4[8];
 
 
 void apply_force( particle_t &particle, particle_t &neighbor ) {
@@ -145,8 +149,8 @@ void init_simulation(particle_t* parts, int num_parts, double size, int rank, in
 	for(int i = 0 ; i < 8; ++i) {
 		if(neighbors[i] != NONE) num_neighbors++;
 	}
-    printf("neighbors[0] through [7]: %d, %d, %d, %d, %d, %d, %d, %d\n", neighbors[0],neighbors[1],neighbors[2],neighbors[3],neighbors[4],neighbors[5],neighbors[6],neighbors[7]);
-    printf("num_neighbors = %d\n", num_neighbors);
+    printf("This is processor %d. Neighbors[0] through [7]: %d, %d, %d, %d, %d, %d, %d, %d\n", rank, neighbors[0],neighbors[1],neighbors[2],neighbors[3],neighbors[4],neighbors[5],neighbors[6],neighbors[7]);
+    printf("This is processor %d. num_neighbors = %d\n", rank, num_neighbors);
 
 	MPI_Barrier(MPI_COMM_WORLD);
     local_parts.clear(); 
@@ -157,10 +161,10 @@ void init_simulation(particle_t* parts, int num_parts, double size, int rank, in
 		}
 	}
 	nlocal = local_parts.size();
-    printf("nlocal = %d\n", nlocal); 
+    printf("This is processor %d. nlocal = %d\n", rank, nlocal); 
 
 
-    printf("Done with INIT\n");
+    printf("This is processor %d. Done with INIT\n", rank);
 }
 
 
@@ -218,50 +222,52 @@ void simulate_one_step(particle_t* parts, int num_parts, double size, int rank, 
 			}
 		}
 	}
-    printf("Done with preparing ghost package. \n");
+    printf("This is processor %d. Done with preparing ghost package. \n", rank);
 
-    // send ghost packets
-	for(int i = 0; i < 8; ++i) {
-		if(neighbors[i] != NONE) {
+    for(int i = 0; i < 8; ++i) {
+        if (neighbors[i] != NONE) {
             ghosts_outgoing_size[i] = ghosts_outgoing[i].size();
-            MPI_Send(&(ghosts_outgoing_size[i]), 1, MPI_INT, neighbors[i], GHOST_SIZE_TAG, MPI_COMM_WORLD);
-
-            MPI_Isend(ghosts_outgoing[i].data(), ghosts_outgoing[i].size(), PARTICLE, neighbors[i], GHOST_TAG, MPI_COMM_WORLD, &(mpi_ghost_requests[i]));
-            MPI_Wait(&(mpi_ghost_requests[i]), MPI_STATUS_IGNORE);
-		}
-	}
-    printf("Done with sending ghost package. \n");
-
-    // receive ghost packets
-    MPI_Status status_size;
-    MPI_Status status_data;
-    for(int i = 0; i < 8; i++) {
-        if(neighbors[i] == NONE) continue;
-
-        MPI_Recv(&(ghosts_incomingBuffer_size[i]), 1, MPI_INT, neighbors[i], GHOST_SIZE_TAG, MPI_COMM_WORLD, &status_size);
-
-        ghosts_incomingBuffer[i].resize(ghosts_incomingBuffer_size[i]);
-        MPI_Recv(ghosts_incomingBuffer[i].data(), ghosts_incomingBuffer_size[i], PARTICLE, neighbors[i], GHOST_TAG, MPI_COMM_WORLD, &status_data);
+            MPI_Isend(&(ghosts_outgoing_size[i]), 1, MPI_INT, neighbors[i], GHOST_SIZE_TAG, MPI_COMM_WORLD, &(mpi_ghost_size_requests[i]));
+        }
     }
-    // MPI_Waitall(num_neighbors, mpi_ghost_requests, MPI_STATUSES_IGNORE);
-    printf("Done with receiving ghost package. \n");
+    for (int i = 0; i < 8; ++i) {
+        if (neighbors[i] != NONE) {
+            MPI_Irecv(&(ghosts_incomingBuffer_size[i]), 1, MPI_INT, neighbors[i], GHOST_SIZE_TAG, MPI_COMM_WORLD, &(mpi_ghost_size_requests[i]));
+        }
+    }
+    MPI_Waitall(8, mpi_ghost_size_requests, status1);
+    for(int i = 0; i < 8; ++i) {
+        if (neighbors[i] != NONE) {
+            MPI_Isend(ghosts_outgoing[i].data(), ghosts_outgoing[i].size(), PARTICLE, neighbors[i], GHOST_TAG, MPI_COMM_WORLD, &(mpi_ghost_data_requests[i]));
+        }
+    }
+    for (int i = 0; i < 8; ++i) {
+        if (neighbors[i] != NONE) {
+            ghosts_incomingBuffer[i].resize(ghosts_incomingBuffer_size[i]);
+            MPI_Irecv(ghosts_incomingBuffer[i].data(), ghosts_incomingBuffer_size[i], PARTICLE, neighbors[i], GHOST_TAG, MPI_COMM_WORLD, &(mpi_ghost_data_requests[i]));
+        }
+    }
+    MPI_Waitall(8, mpi_ghost_data_requests, status2);
     for (int i = 0; i < 8; ++i) {
         all_incoming_ghosts.insert(all_incoming_ghosts.end(), ghosts_incomingBuffer[i].begin(), ghosts_incomingBuffer[i].end());
     }
+    printf("This is processor %d. Done with sending and receiving ghost package. \n", rank);
 
-    
     //  Compute all forces
     compute_forces(local_parts, all_incoming_ghosts);
-    printf("Done with computing forces. \n");
+    printf("This is processor %d. Done with computing forces. \n", rank);
     
     //  Move particles
     for(int i = 0; i < local_parts.size(); ++i) {
         move( local_parts[i], size);
     }
-    printf("Done with moving particles. \n");
+    printf("This is processor %d. Done with moving particles. \n", rank);
     
     //  Handle particle migration
-    printf("before emigration, nlocal = %d\n", local_parts.size()); 
+    printf("This is rank %d. Before emigration, there are %d local particles.\nTheir positions are: \n", rank, local_parts.size());
+	for(int i = 0; i < local_parts.size(); ++i) { printf("%.4f %.4f    ", local_parts[i].x, local_parts[i].y); }
+    printf("\n");
+
     int exit_dir;
     auto iter = local_parts.begin();
     while (iter != local_parts.end()) {
@@ -292,46 +298,42 @@ void simulate_one_step(particle_t* parts, int num_parts, double size, int rank, 
             ++iter; // Move to the next element
         }
     }
-    printf("After emigration, nlocal = %d\n", local_parts.size());
 
-    // Send emigrants
     for(int i = 0; i < 8; ++i) {
-		if(neighbors[i] != NONE) {
-            moving_in_size[i] = moving_in_parts[i].size(); 
-            MPI_Send(&(moving_in_size[i]), 1, MPI_INT, neighbors[i], EMIGRANT_SIZE_TAG, MPI_COMM_WORLD);
-
-            MPI_Isend(moving_in_parts[i].data(), moving_in_parts[i].size(), PARTICLE, neighbors[i], EMIGRANT_TAG, MPI_COMM_WORLD, &(mpi_move_requests[i]));
-            MPI_Wait(&(mpi_move_requests[i]), MPI_STATUS_IGNORE);
-		}
-	}
-    printf("Done with sending emigrant particles. \n");
-
-    // receive immigrant particles
-    MPI_Status status_migrant_size;
-    MPI_Status status_migrant_data;
-    for(int i = 0; i < 8; i++) {
-        if(neighbors[i] == NONE) continue;
-
-        MPI_Recv(&(moving_in_size[i]), 1, MPI_INT, neighbors[i], EMIGRANT_SIZE_TAG, MPI_COMM_WORLD, &status_migrant_size);
-
-        moving_in_parts[i].resize(moving_in_size[i]);
-        MPI_Recv(moving_in_parts[i].data(), moving_in_size[i], PARTICLE, neighbors[i], EMIGRANT_TAG, MPI_COMM_WORLD, &status_migrant_data);
+        if (neighbors[i] != NONE) {
+            moving_out_size[i] = moving_out_parts[i].size(); 
+            MPI_Isend(&(moving_out_size[i]), 1, MPI_INT, neighbors[i], EMIGRANT_SIZE_TAG, MPI_COMM_WORLD, &(mpi_move_size_requests[i]));
+        }
     }
-    // MPI_Waitall(num_neighbors, mpi_move_requests, MPI_STATUSES_IGNORE);
-    printf("Done with receiving immigrant particles. \n");
+    for (int i = 0; i < 8; ++i) {
+        if (neighbors[i] != NONE) {
+            MPI_Irecv(&(moving_in_size[i]), 1, MPI_INT, neighbors[i], EMIGRANT_SIZE_TAG, MPI_COMM_WORLD, &(mpi_move_size_requests[i]));
+        }
+    }
+    MPI_Waitall(8, mpi_move_size_requests, status3);
+    for(int i = 0; i < 8; ++i) {
+        if (neighbors[i] != NONE) {
+            MPI_Isend(moving_out_parts[i].data(), moving_out_parts[i].size(), PARTICLE, neighbors[i], EMIGRANT_TAG, MPI_COMM_WORLD, &(mpi_move_data_requests[i]));
+        }
+    }
+    for (int i = 0; i < 8; ++i) {
+        if (neighbors[i] != NONE) {
+            moving_in_parts[i].resize(moving_in_size[i]);
+            MPI_Irecv(moving_in_parts[i].data(), moving_in_size[i], PARTICLE, neighbors[i], EMIGRANT_TAG, MPI_COMM_WORLD, &(mpi_move_data_requests[i]));
+        }
+    }
+    MPI_Waitall(8, mpi_move_data_requests, status4);
+    printf("This is rank %d. We sent out a total of %d particles. Done with sending emigrant particles. There are %d local particles.\nTheir positions are: \n", rank, (moving_out_size[0]+moving_out_size[1]+moving_out_size[2]+moving_out_size[3]+moving_out_size[4]+moving_out_size[5]+moving_out_size[6]+moving_out_size[7]), local_parts.size());
+	for(int i = 0; i < local_parts.size(); ++i) { printf("%.4f %.4f    ", local_parts[i].x, local_parts[i].y); }
+    printf("\n");
 
     for (int i = 0; i < 8; ++i) {
         local_parts.insert(local_parts.end(), moving_in_parts[i].begin(), moving_in_parts[i].end());
     }
     nlocal = local_parts.size(); 
 
-
-    /*
-    printf("This is rank %d. There are %d local particles.\nThe positions are: \n", rank, nlocal);
-	for(int i = 0; i < nlocal; ++i) {
-		printf("%f %f    ", local_parts[i].x, local_parts[i].y);
-	}
-    */
+    printf("This is rank %d. We just received a total of %d particles. Done with receiving immigrant particles. There are %d local particles.\nTheir positions are: \n", rank, (moving_in_size[0]+moving_in_size[1]+moving_in_size[2]+moving_in_size[3]+moving_in_size[4]+moving_in_size[5]+moving_in_size[6]+moving_in_size[7]), local_parts.size());
+	for(int i = 0; i < local_parts.size(); ++i) { printf("%.4f %.4f    ", local_parts[i].x, local_parts[i].y); }
     printf("\n");
 
 }
